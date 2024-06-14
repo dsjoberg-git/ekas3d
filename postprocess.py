@@ -41,7 +41,7 @@ epsr_defect = data['epsr_defect']
 epsr_array_ref = data['epsr_array_ref']
 epsr_array_dut = data['epsr_array_dut']
 
-if True: # Reduce data to only selected combinations
+if False: # Reduce data to only selected combinations
     Nf = len(fvec)
     Np = S_ref.shape[-1]
     ports = np.arange(Np)
