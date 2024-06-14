@@ -20,7 +20,7 @@ fdim = tdim - 1       # Facet dimension
 
 # Load mesh and prepare function space for delta_epsr
 mesh, subdomains, boundaries = dolfinx.io.gmshio.read_from_msh(filename_mesh, comm=MPI.COMM_WORLD, rank=0, gdim=tdim)
-Wspace = dolfinx.fem.FunctionSpace(mesh, ('DG', 0))
+Wspace = dolfinx.fem.functionspace(mesh, ('DG', 0))
 delta_epsr = dolfinx.fem.Function(Wspace)
 
 # Load previously computed values

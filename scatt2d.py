@@ -5,7 +5,8 @@
 
 from mpi4py import MPI
 import numpy as np
-import dolfinx, ufl
+import dolfinx, ufl, basix
+import dolfinx.fem.petsc
 import gmsh
 from scipy.constants import c as c0
 from matplotlib import pyplot as plt
@@ -88,7 +89,7 @@ for n in range(N_antennas):
 # Create material and defect
 #mat = gmsh.model.occ.addRectangle(mat_pos[0] - mat_width/2, mat_pos[1] - mat_height/2, mat_pos[2], mat_width, mat_height)
 #defect = gmsh.model.occ.addDisk(defect_pos[0], defect_pos[1], defect_pos[2], defect_radius, defect_radius)
-if False:
+if True:  # Aircraft geometry
     mat_body = gmsh.model.occ.addDisk(0, 0, 0, 3*lambda0, 0.5*lambda0)
     mat_tail = gmsh.model.occ.addDisk(0, 0, 0, lambda0, 0.3*lambda0)
     gmsh.model.occ.rotate([(tdim, mat_tail)], 0, 0, 0, 0, 0, 1, np.pi/2)
@@ -105,7 +106,7 @@ if False:
     defect2 = gmsh.model.occ.addDisk(-2*lambda0, 0, 0, defect_radius, defect_radius)
     defect3 = gmsh.model.occ.addRectangle(1.5*lambda0, -0.2*lambda0, 0, lambda0, 0.1*lambda0)
     defectDimTags, defectDimTagsMap = gmsh.model.occ.fuse([(tdim, defect1)], [(tdim, defect2), (tdim, defect3)])
-else:
+else:  # Curved radome geometry
     mat_point1 = gmsh.model.occ.addPoint(-2.5*lambda0, 2*lambda0, 0)
     mat_point2 = gmsh.model.occ.addPoint(3*lambda0, 0, 0)
     mat_point3 = gmsh.model.occ.addPoint(-2.5*lambda0, -2*lambda0, 0)
@@ -161,18 +162,20 @@ antenna_surface_markers = [gmsh.model.addPhysicalGroup(fdim, [s]) for s in anten
 gmsh.model.occ.synchronize()
 gmsh.model.mesh.generate(tdim)
 gmsh.write('tmp.msh')
-if True:
+if False:
     gmsh.fltk.run()
     exit()
 mesh, subdomains, boundaries = dolfinx.io.gmshio.model_to_mesh(
     gmsh.model, comm=MPI.COMM_WORLD, rank=0, gdim=tdim)
 gmsh.finalize()
 
+mesh.topology.create_connectivity(tdim, tdim)
+
 # Set up FEM function spaces and boundary conditions.
-curl_element = ufl.FiniteElement('N1curl', mesh.ufl_cell(), fem_degree)
-lagrange_element = ufl.FiniteElement('CG', mesh.ufl_cell(), fem_degree)
-mixed_element = ufl.MixedElement([curl_element, lagrange_element])
-Vspace = dolfinx.fem.FunctionSpace(mesh, mixed_element)
+curl_element = basix.ufl.element('N1curl', mesh.basix_cell(), fem_degree)
+lagrange_element = basix.ufl.element('CG', mesh.basix_cell(), fem_degree)
+mixed_element = basix.ufl.mixed_element([curl_element, lagrange_element])
+Vspace = dolfinx.fem.functionspace(mesh, mixed_element)
 V0space, V0_dofs = Vspace.sub(0).collapse()
 V1space, V1_dofs = Vspace.sub(1).collapse()
 
@@ -185,7 +188,7 @@ ds_antennas = [ds(m) for m in antenna_surface_markers]
 ds_pec = ds(pec_surface_marker)
 
 # Set up material parameters
-Wspace = dolfinx.fem.FunctionSpace(mesh, ("DG", 0))
+Wspace = dolfinx.fem.functionspace(mesh, ("DG", 0))
 epsr = dolfinx.fem.Function(Wspace)
 mur = dolfinx.fem.Function(Wspace)
 epsr.x.array[:] = epsr_bkg
@@ -331,11 +334,11 @@ b2 = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
 b3 = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
 # Create function spaces for temporary interpolation
 q = dolfinx.fem.Function(Wspace)
-bb_tree = dolfinx.geometry.BoundingBoxTree(mesh, mesh.topology.dim)
+bb_tree = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim)
 cell_volumes = dolfinx.fem.assemble_vector(dolfinx.fem.form(ufl.conj(ufl.TestFunction(Wspace))*ufl.dx)).array
 def q_func(x, Em, En, k0, conjugate=False):
     cells = []
-    cell_candidates = dolfinx.geometry.compute_collisions(bb_tree, x.T)
+    cell_candidates = dolfinx.geometry.compute_collisions_points(bb_tree, x.T)
     colliding_cells = dolfinx.geometry.compute_colliding_cells(mesh, cell_candidates, x.T)
     for i, point in enumerate(x.T):
         if len(colliding_cells.links(i)) > 0:
@@ -382,12 +385,12 @@ np.savez('output.npz', A0=A0, A1=A1, A2=A2, A3=A3, b0=b0, b1=b1, b2=b2, b3=b3, f
 E_h = solutions_dut[-1][0]
 
 # Plot the field in the domain
-PlotSpace = dolfinx.fem.FunctionSpace(mesh, ('CG', 1))
+PlotSpace = dolfinx.fem.functionspace(mesh, ('CG', 1))
 E_plot = dolfinx.fem.Function(PlotSpace)
 def CreateGrid(E):
     E_plot.interpolate(dolfinx.fem.Expression(E, PlotSpace.element.interpolation_points()))
     E_plot_array = E_plot.x.array
-    cells, cell_types, x = dolfinx.plot.create_vtk_mesh(mesh, tdim)
+    cells, cell_types, x = dolfinx.plot.vtk_mesh(mesh, tdim)
     E_grid = pv.UnstructuredGrid(cells, cell_types, x)
     E_grid["plotfunc"] = np.real(E_plot_array)
     return (E_grid.copy(), E_plot_array.copy())
@@ -405,13 +408,13 @@ clim_Ey = sym_clim(Ey_array)
 clim_Ez = sym_clim(Ez_array)
 
 # Indicate material region
-V = dolfinx.fem.FunctionSpace(mesh, ('DG', 0))
+V = dolfinx.fem.functionspace(mesh, ('DG', 0))
 u = dolfinx.fem.Function(V)
 mat_cells = subdomains.find(mat_marker)
 mat_dofs = dolfinx.fem.locate_dofs_topological(V, entity_dim=tdim, entities=mat_cells)
 u.x.array[:] = 0
 u.x.array[mat_dofs] = 0.25 # Used as opacity value later
-cells, cell_types, x = dolfinx.plot.create_vtk_mesh(mesh, tdim)
+cells, cell_types, x = dolfinx.plot.vtk_mesh(mesh, tdim)
 mat_grid = pv.UnstructuredGrid(cells, cell_types, x)
 mat_grid["u"] = np.real(u.x.array)
 
