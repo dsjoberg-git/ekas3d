@@ -23,7 +23,7 @@ fdim = tdim - 1
 
 # Simulation variables
 f1 = 8e9                        # Start frequency
-f2 = 10e9                       # Stop frequency
+f2 = 12e9                       # Stop frequency
 Nf = 10                         # Number of frequency points
 fvec = np.linspace(f1, f2, Nf)  # Vector of simulation frequencies
 f0 = 10e9                       # Design frequency
