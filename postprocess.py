@@ -1,7 +1,7 @@
 # Script to test optimization in adjoint formulation in a waveguide
 # setting.
 #
-# Daniel Sjöberg, 2024-04-01
+# Daniel Sjöberg, 2024-06-27
 
 from mpi4py import MPI
 import numpy as np
@@ -40,6 +40,7 @@ epsr_mat = data['epsr_mat']
 epsr_defect = data['epsr_defect']
 epsr_array_ref = data['epsr_array_ref']
 epsr_array_dut = data['epsr_array_dut']
+cell_volumes = data['cell_volumes']
 
 if False: # Reduce data to only selected combinations
     Nf = len(fvec)
@@ -94,6 +95,32 @@ A3_apriori = A3[:,idx]
 A3_inv_apriori = np.linalg.pinv(A3_apriori, rcond=svd_threshold)
 z3_tsvd_apriori = np.zeros(z3_tsvd.shape, dtype=complex)
 z3_tsvd_apriori[idx] = np.dot(A3_inv_apriori, b3)
+
+# Save results and compute errors
+np.savez('results.npz', z0_tsvd=z0_tsvd, z1_tsvd=z1_tsvd, z2_tsvd=z2_tsvd, z3_tsvd=z3_tsvd, z0_tsvd_apriori=z0_tsvd_apriori, z1_tsvd_apriori=z1_tsvd_apriori, z2_tsvd_apriori=z2_tsvd_apriori, z3_tsvd_apriori=z3_tsvd_apriori, cell_volumes=cell_volumes) 
+def norm(diff_epsr_try, diff_epsr_true, cell_volumes, p=2):
+    volume = np.sum(cell_volumes)
+    error = (np.sum(np.abs(diff_epsr_try - diff_epsr_true)**p*cell_volumes/volume))**(1/p)
+    return error
+epsr_true = epsr_array_dut - epsr_array_ref
+p = 2
+error1 = norm(z0_tsvd, epsr_true, cell_volumes, p=p)
+error2 = norm(z1_tsvd, epsr_true, cell_volumes, p=p)
+error3 = norm(z2_tsvd, epsr_true, cell_volumes, p=p)
+error4 = norm(z3_tsvd, epsr_true, cell_volumes, p=p)
+error5 = norm(z0_tsvd_apriori[idx], epsr_true[idx], cell_volumes[idx], p=p)
+error6 = norm(z1_tsvd_apriori[idx], epsr_true[idx], cell_volumes[idx], p=p)
+error7 = norm(z2_tsvd_apriori[idx], epsr_true[idx], cell_volumes[idx], p=p)
+error8 = norm(z3_tsvd_apriori[idx], epsr_true[idx], cell_volumes[idx], p=p)
+print(f'Case 1: Eref*Edut: error = {error1}')
+print(f'Case 2: Eref*Eref: error = {error2}')
+print(f'Case 3: Eref*conj(Edut): error = {error3}')
+print(f'Case 4: Eref*conj(Eref): error = {error4}')
+print(f'Case 5: Eref*Edut known shape: error = {error5}')
+print(f'Case 6: Eref*Eref known shape: error = {error6}')
+print(f'Case 7: Eref*conj(Edut) known shape: error = {error7}')
+print(f'Case 8: Eref*conj(Eref) known shape: error = {error8}')
+
 
 with dolfinx.io.XDMFFile(MPI.COMM_WORLD, 'epsr.xdmf', 'w') as f:
     f.write_mesh(mesh)

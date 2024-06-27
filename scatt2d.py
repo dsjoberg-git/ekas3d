@@ -1,7 +1,11 @@
 # 2D scattering with open boundary implemented using stretched
-# coordinate PML.
+# coordinate PML. Computes the scattering matrix and field
+# distribution of an N-port antenna setup surrounding a scatterer,
+# either in TE or TM polarization. The output is saved and
+# postprocessed in a separate script. A video of a typical solution is
+# created and saved in mp4-format.
 #
-# Daniel Sjöberg, 2024-04-13
+# Daniel Sjöberg, 2024-06-27
 
 from mpi4py import MPI
 import numpy as np
@@ -36,10 +40,11 @@ d_pml = lambda0                 # Thickness of PML
 R_pml = R_dom + d_pml           # Outer radius of PML
 
 # Antennas
+polarization = 'TE'             # Choose between 'TE' and 'TM'
 antenna_width = 0.7625*lambda0  # Width of antenna apertures, 22.86 mm
 antenna_thickness = lambda0/10  # Thickness of antenna
 kc = np.pi/antenna_width        # Cutoff wavenumber of antenna
-N_antennas = 10                  # Number of antennas
+N_antennas = 10                 # Number of antennas
 R_antennas = 4*lambda0          # Radius at which antennas are placed
 phi_antennas = np.linspace(0, 2*np.pi, N_antennas + 1)[:-1]
 pos_antennas = np.array([[R_antennas*np.cos(phi), R_antennas*np.sin(phi), 0] for phi in phi_antennas])
@@ -53,8 +58,8 @@ mat_width = lambda0
 mat_height = lambda0
 defect_pos = np.array([0, 0, 0])
 defect_radius = 0.1*lambda0
-epsr_mat = 3.0
-epsr_defect = 2.5
+epsr_mat = 3.0*(1 - 0.01j)
+epsr_defect = 2.5*(1 - 0.01j)
 mur_mat = 1.0
 mur_defect = 1.0
 
@@ -222,7 +227,7 @@ def pml_epsr_murinv(pml_coords, r):
     epsr_pml = ufl.det(J) * A * epsr * ufl.transpose(A)
     mur_pml = ufl.det(J) * A * mur * ufl.transpose(A)
     murinv_pml = ufl.inv(mur_pml)
-    return (epsr_pml, murinv_pml)
+    return epsr_pml, murinv_pml
 
 x, y = ufl.SpatialCoordinate(mesh)
 r = ufl.sqrt(x**2 + y**2)
@@ -247,20 +252,25 @@ def cross3dn(u, n):
     return ufl.as_vector((w_x, w_y, w_z))
 
 # Excitation and boundary conditions
-def Eport(x):
+def Eport(x, pol=polarization):
     """Compute the normalized electric field distribution in all ports."""
     Ep = np.zeros((3, x.shape[1]), dtype=complex)
     for p in range(N_antennas):
         center = pos_antennas[p]
-        phi = -phi_antennas[p] # Note rotation is by -phi here
+#        phi = -phi_antennas[p] # Note rotation is by -phi here
+        phi = -rot_antennas[p] # Note rotation by the negative of antenna rotation
         Rmat = np.array([[np.cos(phi), -np.sin(phi), 0],
                          [np.sin(phi), np.cos(phi), 0],
                          [0, 0, 1]])
         y = np.transpose(x.T - center)
         loc_x = np.dot(Rmat, y)
-        Ep_tmp = np.vstack((0*loc_x[0], 0*loc_x[0], np.cos(kc*loc_x[0])))/np.sqrt(antenna_width/2)
-        Ep_tmp[:,np.sqrt(loc_x[0]**2 + loc_x[1]**2 + loc_x[2]**2) > antenna_width] = 0
-        Ep = Ep + Ep_tmp
+        if pol == 'TE':
+            Ep_loc = np.vstack((0*loc_x[0], 0*loc_x[0], np.cos(kc*loc_x[0])))/np.sqrt(antenna_width/2)
+        else:
+            Ep_loc = np.vstack((np.ones(loc_x[0].shape)/np.sqrt(antenna_width), 0*loc_x[0], 0*loc_x[0]))
+        Ep_loc[:,np.sqrt(loc_x[0]**2 + loc_x[1]**2 + loc_x[2]**2) > antenna_width] = 0
+        Ep_global = np.dot(Rmat, Ep_loc)
+        Ep = Ep + Ep_global
     return Ep
 Ep = dolfinx.fem.Function(Vspace)
 Ep.sub(0).interpolate(lambda x: Eport(x)[0:2])
@@ -281,7 +291,7 @@ k00 = dolfinx.fem.Constant(mesh, 1j)
 a = [dolfinx.fem.Constant(mesh, 1.0 + 0j) for n in range(N_antennas)]
 F_antennas_str = ''
 for n in range(N_antennas):
-    F_antennas_str += f"""+ 1j*k00/Zrel*ufl.inner(cross3dn(E, nvec), cross3dn(v, nvec))*ds_antennas[{n}] - 1j*k00/Zrel*2*a[{n}]*ufl.sqrt(Zrel*eta0)*ufl.inner(Ep, v)*ds_antennas[{n}]"""
+    F_antennas_str += f"""+ 1j*k00/Zrel*ufl.inner(cross3dn(E, nvec), cross3dn(v, nvec))*ds_antennas[{n}] - 1j*k00/Zrel*2*a[{n}]*ufl.sqrt(Zrel*eta0)*ufl.inner(cross3dn(Ep, nvec), cross3dn(v, nvec))*ds_antennas[{n}]"""
 F = ufl.inner(1/mur*curl_E, curl_v)*dx_dom \
     - ufl.inner(k00**2*epsr*E, v)*dx_dom \
     + ufl.inner(murinv_pml*curl_E, curl_v)*dx_pml \
@@ -307,12 +317,12 @@ def ComputeFields():
             a[n].value = 1.0
             E_h = problem.solve()
             for m in range(N_antennas):
-                factor = dolfinx.fem.assemble.assemble_scalar(dolfinx.fem.form(2*ufl.sqrt(Zrel*eta0)*ufl.inner(Ep, Ep)*ds_antennas[m]))
+                factor = dolfinx.fem.assemble.assemble_scalar(dolfinx.fem.form(2*ufl.sqrt(Zrel*eta0)*ufl.inner(cross3dn(Ep, nvec), cross3dn(Ep, nvec))*ds_antennas[m]))
                 b = dolfinx.fem.assemble.assemble_scalar(dolfinx.fem.form(ufl.inner(cross3dn(E_h, nvec), cross3dn(Ep, nvec))*ds_antennas[m] + Zrel/(1j*k0)*ufl.inner(curl3d(E_h), cross3dn(Ep, nvec))*ds_antennas[m]))/factor
                 S[nf,m,n] = b
             sols.append(E_h.copy())
         solutions.append(sols)
-    return (S, solutions)
+    return S, solutions
 
 print('Computing REF solutions')
 epsr.x.array[:] = epsr_array_ref
@@ -351,7 +361,8 @@ def q_func(x, Em, En, k0, conjugate=False):
         En_vals_xy = np.conjugate(En_vals_xy)
         En_vals_z = np.conjugate(En_vals_z)
     values = -1j*k0/eta0/2*(Em_vals_xy[:,0]*En_vals_xy[:,0] + Em_vals_xy[:,1]*En_vals_xy[:,1] + Em_vals_z[:,0]*En_vals_z[:,0])*cell_volumes
-    return(values)
+    return values
+
 for nf in range(Nf):
     print(f'Frequency {nf+1} / {Nf}')
     k0 = 2*np.pi*fvec[nf]/c0
@@ -378,7 +389,7 @@ for nf in range(Nf):
             A3[nf*N_antennas*N_antennas + m*N_antennas + n,:] = q.x.array[:]
 
 # Save values for further postprocessing
-np.savez('output.npz', A0=A0, A1=A1, A2=A2, A3=A3, b0=b0, b1=b1, b2=b2, b3=b3, fvec=fvec, S_ref=S_ref, S_dut=S_dut, epsr_mat=epsr_mat, epsr_defect=epsr_defect, epsr_array_ref=epsr_array_ref, epsr_array_dut=epsr_array_dut)
+np.savez('output.npz', A0=A0, A1=A1, A2=A2, A3=A3, b0=b0, b1=b1, b2=b2, b3=b3, fvec=fvec, S_ref=S_ref, S_dut=S_dut, epsr_mat=epsr_mat, epsr_defect=epsr_defect, epsr_array_ref=epsr_array_ref, epsr_array_dut=epsr_array_dut, cell_volumes=cell_volumes)
 
 #exit()
 
@@ -393,7 +404,7 @@ def CreateGrid(E):
     cells, cell_types, x = dolfinx.plot.vtk_mesh(mesh, tdim)
     E_grid = pv.UnstructuredGrid(cells, cell_types, x)
     E_grid["plotfunc"] = np.real(E_plot_array)
-    return (E_grid.copy(), E_plot_array.copy())
+    return E_grid.copy(), E_plot_array.copy()
         
 def sym_clim(E):
     E_max = np.max(np.abs(E))
