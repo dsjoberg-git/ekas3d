@@ -5,7 +5,7 @@ Files for simulating a scattering geometry and locate defects in the EKAS3D proj
 
 The installation instructions below are based on the instructions for installing [fe2ms](https://github.com/nwingren/fe2ms), a FE-BI hybrid code developed by Niklas Wingren. 
 
-The code is primarily based on FEniCSx which is available on macOS and Linux. However, installation of this package has only been tested on Ubuntu and the installation instructions are written for this. For Windows users, Linux can be run easily using Windows Subsystem for Linux (WSL, make sure you have WSL2). Installation instructions and more information can be found [here](https://learn.microsoft.com/en-us/windows/wsl/install).
+The code is primarily based on FEniCSx which is available on macOS and Linux. However, installation of this package has only been tested on Ubuntu and the installation instructions are written for this. For Windows users, Linux can be run easily using Windows Subsystem for Linux (WSL, make sure you have WSL2, you may need to enable Virtual Machine Feature). Installation instructions and more information can be found [here](https://learn.microsoft.com/en-us/windows/wsl/install).
 
 Installation using mamba (similar to conda) is recommended. The instructions are as follows.
 
