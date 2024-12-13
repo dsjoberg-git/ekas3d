@@ -5,7 +5,13 @@
 # postprocessed in a separate script. A video of a typical solution is
 # created and saved in mp4-format.
 #
-# Daniel Sjöberg, 2024-06-27
+# The code makes use of MPI to enable parallel processing. However,
+# you may need to execute "export OMP_NUM_THREADS=1" when running with
+# something like "mpirun -n 4 python testmpi.py", to prevent PETSc
+# from starting too many threads, see for instance
+# https://fenicsproject.discourse.group/t/running-in-parallel-slower-than-serial/1661
+#
+# Daniel Sjöberg, 2024-12-13
 
 from mpi4py import MPI
 import numpy as np
@@ -17,6 +23,11 @@ from matplotlib import pyplot as plt
 import pyvista as pv
 import pyvistaqt as pvqt
 import functools
+import sys
+
+# MPI settings
+comm = MPI.COMM_WORLD
+model_rank = 0
 
 # Physical constants and geometry dimension
 mu0 = 4*np.pi*1e-7
@@ -65,113 +76,126 @@ mur_defect = 1.0
 
 # Set up mesh using gmsh
 gmsh.initialize()
-# Typical mesh size
-gmsh.option.setNumber('General.Verbosity', 1)
-gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h)
-gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h)
+if comm.rank == model_rank:
+    # Typical mesh size
+    gmsh.option.setNumber('General.Verbosity', 1)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMin", h)
+    gmsh.option.setNumber("Mesh.CharacteristicLengthMax", h)
 
-# Create antennas
-antennas_DimTags = []
-x_antenna = np.zeros((N_antennas, 3))
-x_pec = np.zeros((N_antennas, 3, 3))
-inAntennaSurface = []
-inPECSurface = []
-for n in range(N_antennas):
-    rect = gmsh.model.occ.addRectangle(-antenna_width/2, -antenna_thickness, 0, antenna_width, antenna_thickness)
-    gmsh.model.occ.rotate([(tdim, rect)], 0, 0, 0, 0, 0, 1, rot_antennas[n])
-    gmsh.model.occ.translate([(tdim, rect)], pos_antennas[n,0], pos_antennas[n,1], pos_antennas[n,2])
-    antennas_DimTags.append((tdim, rect))
-    x_antenna[n] = pos_antennas[n, :]
-    Rmat = np.array([[np.cos(rot_antennas[n]), -np.sin(rot_antennas[n]), 0],
-                     [np.sin(rot_antennas[n]), np.cos(rot_antennas[n]), 0],
-                     [0, 0, 1]])
-    x_pec[n, 0] = x_antenna[n] + np.dot(Rmat, np.array([antenna_width/2, -antenna_thickness/2, 0]))
-    x_pec[n, 1] = x_antenna[n] + np.dot(Rmat, np.array([-antenna_width/2, -antenna_thickness/2, 0]))
-    x_pec[n, 2] = x_antenna[n] + np.dot(Rmat, np.array([0, -antenna_thickness, 0]))
-    inAntennaSurface.append(lambda x: np.allclose(x, x_antenna[n]))
-    inPECSurface.append(lambda x: np.allclose(x, x_pec[n,0]) or np.allclose(x, x_pec[n,1]) or np.allclose(x, x_pec[n,2]))
-
-# Create material and defect
-#mat = gmsh.model.occ.addRectangle(mat_pos[0] - mat_width/2, mat_pos[1] - mat_height/2, mat_pos[2], mat_width, mat_height)
-#defect = gmsh.model.occ.addDisk(defect_pos[0], defect_pos[1], defect_pos[2], defect_radius, defect_radius)
-if True:  # Aircraft geometry
-    mat_body = gmsh.model.occ.addDisk(0, 0, 0, 3*lambda0, 0.5*lambda0)
-    mat_tail = gmsh.model.occ.addDisk(0, 0, 0, lambda0, 0.3*lambda0)
-    gmsh.model.occ.rotate([(tdim, mat_tail)], 0, 0, 0, 0, 0, 1, np.pi/2)
-    gmsh.model.occ.translate([(tdim, mat_tail)], -2.5*lambda0, 0, 0)
-    mat_wing1 = gmsh.model.occ.addDisk(0, 0, 0, 1.6*lambda0, 0.3*lambda0)
-    mat_wing2 = gmsh.model.occ.addDisk(0, 0, 0, 1.6*lambda0, 0.3*lambda0)
-    gmsh.model.occ.translate([(tdim, mat_wing1), (tdim, mat_wing2)], -1.1*lambda0, 0, 0)
-    gmsh.model.occ.rotate([(tdim, mat_wing1)], 0, 0, 0, 0, 0, 1, 60*np.pi/180)
-    gmsh.model.occ.rotate([(tdim, mat_wing2)], 0, 0, 0, 0, 0, 1, -60*np.pi/180)
-    gmsh.model.occ.translate([(tdim, mat_wing1), (tdim, mat_wing2)], 0.6*lambda0, 0, 0)
-    matDimTags, matDimTagsMap = gmsh.model.occ.fuse([(tdim, mat_body)], [(tdim, mat_tail), (tdim, mat_wing1), (tdim, mat_wing2)])
-
-    defect1 = gmsh.model.occ.addDisk(0, lambda0, 0, defect_radius, defect_radius)
-    defect2 = gmsh.model.occ.addDisk(-2*lambda0, 0, 0, defect_radius, defect_radius)
-    defect3 = gmsh.model.occ.addRectangle(1.5*lambda0, -0.2*lambda0, 0, lambda0, 0.1*lambda0)
-    defectDimTags, defectDimTagsMap = gmsh.model.occ.fuse([(tdim, defect1)], [(tdim, defect2), (tdim, defect3)])
-else:  # Curved radome geometry
-    mat_point1 = gmsh.model.occ.addPoint(-2.5*lambda0, 2*lambda0, 0)
-    mat_point2 = gmsh.model.occ.addPoint(3*lambda0, 0, 0)
-    mat_point3 = gmsh.model.occ.addPoint(-2.5*lambda0, -2*lambda0, 0)
-    mat_point4 = gmsh.model.occ.addPoint(-2.5*lambda0, 1.5*lambda0, 0)
-    mat_point5 = gmsh.model.occ.addPoint(2.5*lambda0, 0, 0)
-    mat_point6 = gmsh.model.occ.addPoint(-2.5*lambda0, -1.5*lambda0, 0)
-    mat_curve1 = gmsh.model.occ.addSpline([mat_point1, mat_point2, mat_point3])
-    mat_curve2 = gmsh.model.occ.addSpline([mat_point4, mat_point5, mat_point6])
-    mat_line1 = gmsh.model.occ.addLine(mat_point4, mat_point1)
-    mat_line2 = gmsh.model.occ.addLine(mat_point3, mat_point6)
-    mat_curveloop = gmsh.model.occ.addCurveLoop([mat_curve1, mat_line2, mat_curve2, mat_line1])
-    mat = gmsh.model.occ.addPlaneSurface([mat_curveloop])
-    matDimTags = [(tdim, mat)]
-
-    defect1 = gmsh.model.occ.addDisk(-2.1*lambda0, 1.7*lambda0, 0, defect_radius, defect_radius)
-    defect2 = gmsh.model.occ.addDisk(2.75*lambda0, 0, 0, defect_radius, defect_radius)
-    defect3 = gmsh.model.occ.addRectangle(-1.7*lambda0, -1.7*lambda0, 0, lambda0, 0.1*lambda0)
-    gmsh.model.occ.rotate([(tdim, defect3)], -1.7*lambda0, -1.7*lambda0, 0, 0, 0, 1, 11*np.pi/180)
-    defectDimTags, defectDimTagsMap = gmsh.model.occ.fuse([(tdim, defect1)], [(tdim, defect2), (tdim, defect3)])
-
-# Create domain and PML region
-domain_disk = gmsh.model.occ.addDisk(0, 0, 0, R_dom, R_dom)
-pml_disk = gmsh.model.occ.addDisk(0, 0, 0, R_pml, R_pml)
-
-# Create fragments and dimtags
-outDimTags, outDimTagsMap = gmsh.model.occ.fragment([(tdim, pml_disk)], [(tdim, domain_disk)] + matDimTags + defectDimTags + antennas_DimTags)
-removeDimTags = [x for x in [y[0] for y in outDimTagsMap[-N_antennas:]]]
-defectDimTags = [x[0] for x in outDimTagsMap[3:] if x[0] not in removeDimTags]
-matDimTags = [x for x in outDimTagsMap[2] if x not in defectDimTags]
-domainDimTags = [x for x in outDimTagsMap[1] if x not in removeDimTags+matDimTags+defectDimTags]
-pmlDimTags = [x for x in outDimTagsMap[0] if x not in domainDimTags+defectDimTags+matDimTags+removeDimTags]
-gmsh.model.occ.remove(removeDimTags)
-gmsh.model.occ.synchronize()
-
-# Make physical groups for domains and PML
-mat_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in matDimTags])
-defect_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in defectDimTags])
-domain_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in domainDimTags])
-pml_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in pmlDimTags])
-
-# Identify antenna surfaces and make physical groups
-pec_surface = []
-antenna_surface = []
-for boundary in gmsh.model.occ.getEntities(dim=fdim):
-    CoM = gmsh.model.occ.getCenterOfMass(boundary[0], boundary[1])
+    # Create antennas
+    antennas_DimTags = []
+    x_antenna = np.zeros((N_antennas, 3))
+    x_pec = np.zeros((N_antennas, 3, 3))
+    inAntennaSurface = []
+    inPECSurface = []
     for n in range(N_antennas):
-        if inPECSurface[n](CoM):
-            pec_surface.append(boundary[1])
-        if inAntennaSurface[n](CoM):
-            antenna_surface.append(boundary[1])
-pec_surface_marker = gmsh.model.addPhysicalGroup(fdim, pec_surface)
-antenna_surface_markers = [gmsh.model.addPhysicalGroup(fdim, [s]) for s in antenna_surface]
-gmsh.model.occ.synchronize()
-gmsh.model.mesh.generate(tdim)
-gmsh.write('tmp.msh')
-if False:
-    gmsh.fltk.run()
-    exit()
+        rect = gmsh.model.occ.addRectangle(-antenna_width/2, -antenna_thickness, 0, antenna_width, antenna_thickness)
+        gmsh.model.occ.rotate([(tdim, rect)], 0, 0, 0, 0, 0, 1, rot_antennas[n])
+        gmsh.model.occ.translate([(tdim, rect)], pos_antennas[n,0], pos_antennas[n,1], pos_antennas[n,2])
+        antennas_DimTags.append((tdim, rect))
+        x_antenna[n] = pos_antennas[n, :]
+        Rmat = np.array([[np.cos(rot_antennas[n]), -np.sin(rot_antennas[n]), 0],
+                         [np.sin(rot_antennas[n]), np.cos(rot_antennas[n]), 0],
+                         [0, 0, 1]])
+        x_pec[n, 0] = x_antenna[n] + np.dot(Rmat, np.array([antenna_width/2, -antenna_thickness/2, 0]))
+        x_pec[n, 1] = x_antenna[n] + np.dot(Rmat, np.array([-antenna_width/2, -antenna_thickness/2, 0]))
+        x_pec[n, 2] = x_antenna[n] + np.dot(Rmat, np.array([0, -antenna_thickness, 0]))
+        inAntennaSurface.append(lambda x: np.allclose(x, x_antenna[n]))
+        inPECSurface.append(lambda x: np.allclose(x, x_pec[n,0]) or np.allclose(x, x_pec[n,1]) or np.allclose(x, x_pec[n,2]))
+
+    # Create material and defect
+    if True:  # Aircraft geometry
+        mat_body = gmsh.model.occ.addDisk(0, 0, 0, 3*lambda0, 0.5*lambda0)
+        mat_tail = gmsh.model.occ.addDisk(0, 0, 0, lambda0, 0.3*lambda0)
+        gmsh.model.occ.rotate([(tdim, mat_tail)], 0, 0, 0, 0, 0, 1, np.pi/2)
+        gmsh.model.occ.translate([(tdim, mat_tail)], -2.5*lambda0, 0, 0)
+        mat_wing1 = gmsh.model.occ.addDisk(0, 0, 0, 1.6*lambda0, 0.3*lambda0)
+        mat_wing2 = gmsh.model.occ.addDisk(0, 0, 0, 1.6*lambda0, 0.3*lambda0)
+        gmsh.model.occ.translate([(tdim, mat_wing1), (tdim, mat_wing2)], -1.1*lambda0, 0, 0)
+        gmsh.model.occ.rotate([(tdim, mat_wing1)], 0, 0, 0, 0, 0, 1, 60*np.pi/180)
+        gmsh.model.occ.rotate([(tdim, mat_wing2)], 0, 0, 0, 0, 0, 1, -60*np.pi/180)
+        gmsh.model.occ.translate([(tdim, mat_wing1), (tdim, mat_wing2)], 0.6*lambda0, 0, 0)
+        matDimTags, matDimTagsMap = gmsh.model.occ.fuse([(tdim, mat_body)], [(tdim, mat_tail), (tdim, mat_wing1), (tdim, mat_wing2)])
+
+        defect1 = gmsh.model.occ.addDisk(0, lambda0, 0, defect_radius, defect_radius)
+        defect2 = gmsh.model.occ.addDisk(-2*lambda0, 0, 0, defect_radius, defect_radius)
+        defect3 = gmsh.model.occ.addRectangle(1.5*lambda0, -0.2*lambda0, 0, lambda0, 0.1*lambda0)
+        defectDimTags, defectDimTagsMap = gmsh.model.occ.fuse([(tdim, defect1)], [(tdim, defect2), (tdim, defect3)])
+    else:  # Curved radome geometry
+        mat_point1 = gmsh.model.occ.addPoint(-2.5*lambda0, 2*lambda0, 0)
+        mat_point2 = gmsh.model.occ.addPoint(3*lambda0, 0, 0)
+        mat_point3 = gmsh.model.occ.addPoint(-2.5*lambda0, -2*lambda0, 0)
+        mat_point4 = gmsh.model.occ.addPoint(-2.5*lambda0, 1.5*lambda0, 0)
+        mat_point5 = gmsh.model.occ.addPoint(2.5*lambda0, 0, 0)
+        mat_point6 = gmsh.model.occ.addPoint(-2.5*lambda0, -1.5*lambda0, 0)
+        mat_curve1 = gmsh.model.occ.addSpline([mat_point1, mat_point2, mat_point3])
+        mat_curve2 = gmsh.model.occ.addSpline([mat_point4, mat_point5, mat_point6])
+        mat_line1 = gmsh.model.occ.addLine(mat_point4, mat_point1)
+        mat_line2 = gmsh.model.occ.addLine(mat_point3, mat_point6)
+        mat_curveloop = gmsh.model.occ.addCurveLoop([mat_curve1, mat_line2, mat_curve2, mat_line1])
+        mat = gmsh.model.occ.addPlaneSurface([mat_curveloop])
+        matDimTags = [(tdim, mat)]
+
+        defect1 = gmsh.model.occ.addDisk(-2.1*lambda0, 1.7*lambda0, 0, defect_radius, defect_radius)
+        defect2 = gmsh.model.occ.addDisk(2.75*lambda0, 0, 0, defect_radius, defect_radius)
+        defect3 = gmsh.model.occ.addRectangle(-1.7*lambda0, -1.7*lambda0, 0, lambda0, 0.1*lambda0)
+        gmsh.model.occ.rotate([(tdim, defect3)], -1.7*lambda0, -1.7*lambda0, 0, 0, 0, 1, 11*np.pi/180)
+        defectDimTags, defectDimTagsMap = gmsh.model.occ.fuse([(tdim, defect1)], [(tdim, defect2), (tdim, defect3)])
+
+    # Create domain and PML region
+    domain_disk = gmsh.model.occ.addDisk(0, 0, 0, R_dom, R_dom)
+    pml_disk = gmsh.model.occ.addDisk(0, 0, 0, R_pml, R_pml)
+
+    # Create fragments and dimtags
+    outDimTags, outDimTagsMap = gmsh.model.occ.fragment([(tdim, pml_disk)], [(tdim, domain_disk)] + matDimTags + defectDimTags + antennas_DimTags)
+    removeDimTags = [x for x in [y[0] for y in outDimTagsMap[-N_antennas:]]]
+    defectDimTags = [x[0] for x in outDimTagsMap[3:] if x[0] not in removeDimTags]
+    matDimTags = [x for x in outDimTagsMap[2] if x not in defectDimTags]
+    domainDimTags = [x for x in outDimTagsMap[1] if x not in removeDimTags+matDimTags+defectDimTags]
+    pmlDimTags = [x for x in outDimTagsMap[0] if x not in domainDimTags+defectDimTags+matDimTags+removeDimTags]
+    gmsh.model.occ.remove(removeDimTags)
+    gmsh.model.occ.synchronize()
+
+    # Make physical groups for domains and PML
+    mat_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in matDimTags])
+    defect_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in defectDimTags])
+    domain_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in domainDimTags])
+    pml_marker = gmsh.model.addPhysicalGroup(tdim, [x[1] for x in pmlDimTags])
+
+    # Identify antenna surfaces and make physical groups
+    pec_surface = []
+    antenna_surface = []
+    for boundary in gmsh.model.occ.getEntities(dim=fdim):
+        CoM = gmsh.model.occ.getCenterOfMass(boundary[0], boundary[1])
+        for n in range(N_antennas):
+            if inPECSurface[n](CoM):
+                pec_surface.append(boundary[1])
+            if inAntennaSurface[n](CoM):
+                antenna_surface.append(boundary[1])
+    pec_surface_marker = gmsh.model.addPhysicalGroup(fdim, pec_surface)
+    antenna_surface_markers = [gmsh.model.addPhysicalGroup(fdim, [s]) for s in antenna_surface]
+    gmsh.model.occ.synchronize()
+    gmsh.model.mesh.generate(tdim)
+    gmsh.write('tmp.msh')
+    if False:
+        gmsh.fltk.run()
+        exit()
+else:
+    mat_marker = None
+    defect_marker = None
+    domain_marker = None
+    pml_marker = None
+    pec_surface_marker = None
+    antenna_surface_markers = None
+mat_marker = comm.bcast(mat_marker, root=model_rank)
+defect_marker = comm.bcast(defect_marker, root=model_rank)
+domain_marker = comm.bcast(domain_marker, root=model_rank)
+pml_marker = comm.bcast(pml_marker, root=model_rank)
+pec_surface_marker = comm.bcast(pec_surface_marker, root=model_rank)
+antenna_surface_markers = comm.bcast(antenna_surface_markers, root=model_rank)
+
 mesh, subdomains, boundaries = dolfinx.io.gmshio.model_to_mesh(
-    gmsh.model, comm=MPI.COMM_WORLD, rank=0, gdim=tdim)
+    gmsh.model, comm=comm, rank=model_rank, gdim=tdim)
 gmsh.finalize()
 
 mesh.topology.create_connectivity(tdim, tdim)
@@ -257,7 +281,6 @@ def Eport(x, pol=polarization):
     Ep = np.zeros((3, x.shape[1]), dtype=complex)
     for p in range(N_antennas):
         center = pos_antennas[p]
-#        phi = -phi_antennas[p] # Note rotation is by -phi here
         phi = -rot_antennas[p] # Note rotation by the negative of antenna rotation
         Rmat = np.array([[np.cos(phi), -np.sin(phi), 0],
                          [np.sin(phi), np.cos(phi), 0],
@@ -307,7 +330,8 @@ def ComputeFields():
     S = np.zeros((Nf, N_antennas, N_antennas), dtype=complex)
     solutions = []
     for nf in range(Nf):
-        print(f'Frequency {nf+1} / {Nf}')
+        print(f'Rank {comm.rank}: Frequency {nf+1} / {Nf}')
+        sys.stdout.flush()
         k00.value = 2*np.pi*fvec[nf]/c0
         Zrel.value = k00.value/np.sqrt(k00.value**2 - kc**2)
         sols = []
@@ -318,31 +342,39 @@ def ComputeFields():
             E_h = problem.solve()
             for m in range(N_antennas):
                 factor = dolfinx.fem.assemble.assemble_scalar(dolfinx.fem.form(2*ufl.sqrt(Zrel*eta0)*ufl.inner(cross3dn(Ep, nvec), cross3dn(Ep, nvec))*ds_antennas[m]))
+                factors = comm.gather(factor, root=model_rank)
+                if comm.rank == model_rank:
+                    factor = sum(factors)
+                else:
+                    factor = None
+                factor = comm.bcast(factor, root=model_rank)
                 b = dolfinx.fem.assemble.assemble_scalar(dolfinx.fem.form(ufl.inner(cross3dn(E_h, nvec), cross3dn(Ep, nvec))*ds_antennas[m] + Zrel/(1j*k0)*ufl.inner(curl3d(E_h), cross3dn(Ep, nvec))*ds_antennas[m]))/factor
+                bs = comm.gather(b, root=model_rank)
+                if comm.rank == model_rank:
+                    b = sum(bs)
+                else:
+                    b = None
+                b = comm.bcast(b, root=model_rank)
                 S[nf,m,n] = b
             sols.append(E_h.copy())
         solutions.append(sols)
     return S, solutions
 
-print('Computing REF solutions')
+print(f'Rank {comm.rank}: Computing REF solutions')
+sys.stdout.flush()
 epsr.x.array[:] = epsr_array_ref
 S_ref, solutions_ref = ComputeFields()
-print('Computing DUT solutions')
+print(f'Rank {comm.rank}: Computing DUT solutions')
+sys.stdout.flush()
 epsr.x.array[:] = epsr_array_dut
 S_dut, solutions_dut = ComputeFields()
 delta_epsr = dolfinx.fem.Function(Wspace)
 
-print('Computing optimization vectors')
+print(f'Rank {comm.rank}: Computing optimization vectors')
+sys.stdout.flush()
 Nepsr = len(delta_epsr.x.array[:])
-A0 = np.zeros((Nf*N_antennas*N_antennas, Nepsr), dtype=complex)
-A1 = np.zeros((Nf*N_antennas*N_antennas, Nepsr), dtype=complex)
-A2 = np.zeros((Nf*N_antennas*N_antennas, Nepsr), dtype=complex)
-A3 = np.zeros((Nf*N_antennas*N_antennas, Nepsr), dtype=complex)
-b0 = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
-b1 = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
-b2 = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
-b3 = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
-# Create function spaces for temporary interpolation
+b = np.zeros(Nf*N_antennas*N_antennas, dtype=complex)
+# Create function space for temporary interpolation
 q = dolfinx.fem.Function(Wspace)
 bb_tree = dolfinx.geometry.bb_tree(mesh, mesh.topology.dim)
 cell_volumes = dolfinx.fem.assemble_vector(dolfinx.fem.form(ufl.conj(ufl.TestFunction(Wspace))*ufl.dx)).array
@@ -363,39 +395,39 @@ def q_func(x, Em, En, k0, conjugate=False):
     values = -1j*k0/eta0/2*(Em_vals_xy[:,0]*En_vals_xy[:,0] + Em_vals_xy[:,1]*En_vals_xy[:,1] + Em_vals_z[:,0]*En_vals_z[:,0])*cell_volumes
     return values
 
+xdmf = dolfinx.io.XDMFFile(comm=comm, filename='output.xdmf', file_mode='w')
+xdmf.write_mesh(mesh)
+epsr.x.array[:] = cell_volumes
+xdmf.write_function(epsr, -3)
+epsr.x.array[:] = epsr_array_ref
+xdmf.write_function(epsr, -2)
+epsr.x.array[:] = epsr_array_dut
+xdmf.write_function(epsr, -1)
 for nf in range(Nf):
-    print(f'Frequency {nf+1} / {Nf}')
+    print(f'Rank {comm.rank}: Frequency {nf+1} / {Nf}')
+    sys.stdout.flush()
     k0 = 2*np.pi*fvec[nf]/c0
     for m in range(N_antennas):
         Em_ref = solutions_ref[nf][m]
         for n in range(N_antennas):
             En_dut = solutions_dut[nf][n]
             En_ref = solutions_ref[nf][n]
-            # Case 0: Eref*Edut
-            b0[nf*N_antennas*N_antennas + m*N_antennas + n] = S_dut[nf, m, n] - S_ref[nf, n, m]
-            q.interpolate(functools.partial(q_func, Em=Em_ref, En=En_dut, k0=k0, conjugate=False))
-            A0[nf*N_antennas*N_antennas + m*N_antennas + n,:] = q.x.array[:]
-            # Case 1: Eref*Eref
-            b1[nf*N_antennas*N_antennas + m*N_antennas + n] = S_dut[nf, m, n] - S_ref[nf, n, m]
+            # Case Eref*Eref
+            b[nf*N_antennas*N_antennas + m*N_antennas + n] = S_dut[nf, m, n] - S_ref[nf, n, m]
             q.interpolate(functools.partial(q_func, Em=Em_ref, En=En_ref, k0=k0, conjugate=False))
-            A1[nf*N_antennas*N_antennas + m*N_antennas + n,:] = q.x.array[:]
-            # Case 2: Eref*conj(Edut)
-            b2[nf*N_antennas*N_antennas + m*N_antennas + n] = np.conjugate(S_dut[nf, m, n]) - S_ref[nf, n, m]
-            q.interpolate(functools.partial(q_func, Em=Em_ref, En=En_dut, k0=k0, conjugate=True))
-            A2[nf*N_antennas*N_antennas + m*N_antennas + n,:] = q.x.array[:]
-            # Case 3: Eref*conj(Eref)
-            b3[nf*N_antennas*N_antennas + m*N_antennas + n] = np.conj(S_dut[nf, m, n]) - S_ref[nf, n, m]
-            q.interpolate(functools.partial(q_func, Em=Em_ref, En=En_ref, k0=k0, conjugate=True))
-            A3[nf*N_antennas*N_antennas + m*N_antennas + n,:] = q.x.array[:]
+            # The function q is one row in the A-matrix, save it to file
+            xdmf.write_function(q, nf*N_antennas*N_antennas + m*N_antennas + n)
 
-# Save values for further postprocessing
-np.savez('output.npz', A0=A0, A1=A1, A2=A2, A3=A3, b0=b0, b1=b1, b2=b2, b3=b3, fvec=fvec, S_ref=S_ref, S_dut=S_dut, epsr_mat=epsr_mat, epsr_defect=epsr_defect, epsr_array_ref=epsr_array_ref, epsr_array_dut=epsr_array_dut, cell_volumes=cell_volumes)
+xdmf.close()
 
-#exit()
+if comm.rank == model_rank: # Save global values for further postprocessing
+    np.savez('output.npz', b=b, fvec=fvec, S_ref=S_ref, S_dut=S_dut, epsr_mat=epsr_mat, epsr_defect=epsr_defect)
+
+exit() # Comment out this line if you want to create some movies
 
 E_h = solutions_dut[-1][0]
 
-# Plot the field in the domain
+# Plot the field in the domain and make an animation
 PlotSpace = dolfinx.fem.functionspace(mesh, ('CG', 1))
 E_plot = dolfinx.fem.Function(PlotSpace)
 def CreateGrid(E):
@@ -408,12 +440,22 @@ def CreateGrid(E):
         
 def sym_clim(E):
     E_max = np.max(np.abs(E))
+    # Find max over all ranks
+    E_maxs = comm.gather(E_max, root=model_rank)
+    if comm.rank == model_rank:
+        E_max = np.max(E_maxs)
+    else:
+        E_max = None
+    E_max = comm.bcast(E_max, root=model_rank)
     clim = [-E_max, E_max]
     return clim
 
 Ex_grid, Ex_array = CreateGrid(E_h[0])
 Ey_grid, Ey_array = CreateGrid(E_h[1])
 Ez_grid, Ez_array = CreateGrid(E_h[2])
+Ex_grids = comm.gather(Ex_grid, root=model_rank)
+Ey_grids = comm.gather(Ey_grid, root=model_rank)
+Ez_grids = comm.gather(Ez_grid, root=model_rank)
 clim_Ex = sym_clim(Ex_array)
 clim_Ey = sym_clim(Ey_array)
 clim_Ez = sym_clim(Ez_array)
@@ -428,28 +470,38 @@ u.x.array[mat_dofs] = 0.25 # Used as opacity value later
 cells, cell_types, x = dolfinx.plot.vtk_mesh(mesh, tdim)
 mat_grid = pv.UnstructuredGrid(cells, cell_types, x)
 mat_grid["u"] = np.real(u.x.array)
+mat_grids = comm.gather(mat_grid, root=model_rank)
 
-plotter = pvqt.BackgroundPlotter(shape=(1,3), window_size=(3840,2160), auto_update=True)
-def AddGrid(E_grid, title='', clim=None):
-    plotter.add_mesh(E_grid, show_edges=False, show_scalar_bar=True, scalar_bar_args={'title': title, 'title_font_size': 12, 'label_font_size': 12}, clim=clim, cmap='bwr')
-    plotter.add_mesh(mat_grid, show_edges=False, scalars='u', opacity='u', cmap='binary', show_scalar_bar=False)
-    plotter.view_xy()
-    plotter.add_text(title, font_size=18)
-    plotter.add_axes()
+# Gather the data arrays for animation
+Ex_arrays = comm.gather(Ex_array, root=model_rank)
+Ey_arrays = comm.gather(Ey_array, root=model_rank)
+Ez_arrays = comm.gather(Ez_array, root=model_rank)
 
-plotter.subplot(0, 0)
-AddGrid(Ex_grid, title='E_x', clim=clim_Ex)
-plotter.subplot(0, 1)
-AddGrid(Ey_grid, title='E_y', clim=clim_Ey)
-plotter.subplot(0, 2)
-AddGrid(Ez_grid, title='E_z', clim=clim_Ez)
-Nphase = 120
-phasevec = np.linspace(0, 2*np.pi, Nphase)
-plotter.open_movie('tmp.mp4')
-for phase in phasevec:
-    Ex_grid["plotfunc"] = np.real(Ex_array*np.exp(1j*phase))
-    Ey_grid["plotfunc"] = np.real(Ey_array*np.exp(1j*phase))
-    Ez_grid["plotfunc"] = np.real(Ez_array*np.exp(1j*phase))
-    plotter.app.processEvents()
-    plotter.write_frame()
-plotter.close()
+if comm.rank == model_rank:
+    plotter = pvqt.BackgroundPlotter(shape=(1,3), window_size=(3840,2160), auto_update=True)
+    def AddGrids(E_grids, title='', clim=None):
+        for g in E_grids:
+            plotter.add_mesh(g, show_edges=False, show_scalar_bar=True, scalar_bar_args={'title': title, 'title_font_size': 12, 'label_font_size': 12}, clim=clim, cmap='bwr')
+        for g in mat_grids:
+            plotter.add_mesh(g, show_edges=False, scalars='u', opacity='u', cmap='binary', show_scalar_bar=False)
+        plotter.view_xy()
+        plotter.add_text(title, font_size=18)
+        plotter.add_axes()
+
+    plotter.subplot(0, 0)
+    AddGrids(Ex_grids, title='E_x', clim=clim_Ex)
+    plotter.subplot(0, 1)
+    AddGrids(Ey_grids, title='E_y', clim=clim_Ey)
+    plotter.subplot(0, 2)
+    AddGrids(Ez_grids, title='E_z', clim=clim_Ez)
+    Nphase = 120
+    phasevec = np.linspace(0, 2*np.pi, Nphase)
+    plotter.open_movie('tmp.mp4')
+    for phase in phasevec:
+        for n in range(comm.size):
+            Ex_grids[n]["plotfunc"] = np.real(Ex_arrays[n]*np.exp(1j*phase))
+            Ey_grids[n]["plotfunc"] = np.real(Ey_arrays[n]*np.exp(1j*phase))
+            Ez_grids[n]["plotfunc"] = np.real(Ez_arrays[n]*np.exp(1j*phase))
+        plotter.app.processEvents()
+        plotter.write_frame()
+    plotter.close()

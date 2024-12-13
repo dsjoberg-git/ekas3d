@@ -31,7 +31,7 @@ mamba install fenics-dolfinx mpich petsc=*=complex*
 This will install other Python packages into the ekas3d environment. ```imageio``` seems to need to be installed through pip instead of mamba. 
 
 ```bash
-mamba install scipy matplotlib python-gmsh pyvista pyvistaqt spgl1
+mamba install scipy matplotlib python-gmsh pyvista pyvistaqt spgl1 h5py
 pip install imageio[ffmpeg]
 ```
 
@@ -48,8 +48,8 @@ sudo apt install vlc
 
 ## Files
 
-- ```scatt2d.py``` is the main simulation code. This creates the geometry and mesh, and computes the scattering problem for the reference case (no defects) and the DUT case (with defects). It also computes the optimization vectors.
-- ```postprocess.py``` runs the optimization to identify the defects.
+- ```scatt2d.py``` is the main simulation code. This creates the geometry and mesh, and computes the scattering problem for the reference case (no defects) and the DUT case (with defects). It also computes the optimization vectors. This can be run in parallel with ```mpirun -n 4 python scatt2d.py```.
+- ```postprocess.py``` runs the optimization to identify the defects. This has not been evaluated in parallel yet.
 
 ## Author
 
