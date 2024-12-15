@@ -31,7 +31,7 @@ mamba install fenics-dolfinx mpich petsc=*=complex*
 This will install other Python packages into the ekas3d environment. ```imageio``` seems to need to be installed through pip instead of mamba. 
 
 ```bash
-mamba install scipy matplotlib python-gmsh pyvista pyvistaqt spgl1 h5py
+mamba install scipy matplotlib python-gmsh pyvista pyvistaqt spgl1 h5py petsc=*=complex*
 pip install imageio[ffmpeg]
 ```
 
