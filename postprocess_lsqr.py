@@ -1,5 +1,6 @@
 # Script for finding the permittivity of defects using data saved from
-# scatt2d.py. 
+# scatt2d.py. This version uses the least squares algorithm LSQR in
+# PETSc.
 #
 # Daniel Sjöberg, 2025-01-06
 

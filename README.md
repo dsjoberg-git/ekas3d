@@ -49,7 +49,9 @@ sudo apt install vlc
 ## Files
 
 - ```scatt2d.py``` is the main simulation code. This creates the geometry and mesh, and computes the scattering problem for the reference case (no defects) and the DUT case (with defects). It also computes the optimization vectors. This can be run in parallel with ```mpirun -n 4 python scatt2d.py```.
-- ```postprocess.py``` runs the optimization to identify the defects. This has not been evaluated in parallel yet.
+- ```postprocess.py``` runs the optimization using SVD to identify the defects. This only works in serial.
+- ```postprocess_lsqr.py``` runs the optimization using LSQR to identify the defects. Works in parallel, but not tested on very large datasets yet.
+- ```convertdata.py``` converts the output data from ```scatt2d.py``` to a format that can be read more easily from ```postprocess_lsqr.py```.
 
 ## Author
 
