@@ -12,7 +12,7 @@
 # from starting too many threads, see for instance
 # https://fenicsproject.discourse.group/t/running-in-parallel-slower-than-serial/1661
 #
-# Daniel SjÃ¶berg, 2024-12-13
+# Daniel Sjöberg, 2024-12-13
 
 from mpi4py import MPI
 import numpy as np
