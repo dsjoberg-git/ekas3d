@@ -13,8 +13,9 @@
 # https://fenicsproject.discourse.group/t/running-in-parallel-slower-than-serial/1661
 #
 # Daniel Sjöberg, 2024-12-13
+# Alexandros Pallaris, after that
 
-##test here test
+
 from mpi4py import MPI
 import numpy as np
 import dolfinx, ufl, basix
@@ -179,7 +180,7 @@ if comm.rank == model_rank:
     gmsh.model.occ.synchronize()
     gmsh.model.mesh.generate(tdim)
     gmsh.write('tmp.msh')
-    if False:
+    if True:
         gmsh.fltk.run()
         exit()
 else:
